@@ -1,0 +1,11 @@
+streamlit>=1.38
+numpy>=1.26
+Pillow>=10.0
+opencv-python-headless>=4.10
+shapely>=2.0
+trimesh>=4.4
+mapbox-earcut>=1.0
+networkx>=3.3
+manifold3d>=3.0
+cairosvg>=2.7
+pytest>=8.0
