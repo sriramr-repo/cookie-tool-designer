@@ -64,6 +64,7 @@ st.title("Cookie Tool Designer")
 st.caption("A private local artwork-to-3D-printable-tool utility. No accounts or cloud services.")
 
 GENERATORS = ["Cookie cutter", "Imprint cutter", "Stamp", "Embosser", "Debosser", "Cutter + stamp", "Stencil", "Cake topper", "Sandwich sealer", "Multi-cutter", "Cake-pop mold"]
+CUTTER_GENERATORS = {"Cookie cutter", "Imprint cutter", "Cutter + stamp", "Sandwich sealer", "Multi-cutter"}
 PROFILE_PRESETS = {
     "Anycubic Kobra S1": PrinterProfile(),
     "Generic FDM (0.4 mm)": PrinterProfile("Generic FDM (0.4 mm)", 0.4, 220, 220, 250, "PLA"),
@@ -140,9 +141,20 @@ if "project" not in st.session_state:
 if "source_data" not in st.session_state:
     st.session_state.source_data = None
 
-# Migrate projects already held in this Streamlit session before bridge support was added.
-if not hasattr(st.session_state.project.tool, "bridge_height_mm"):
-    st.session_state.project.tool.bridge_height_mm = 1.2
+# Migrate projects already held in this Streamlit session as settings evolve.
+for _field, _default in {
+    "bridge_height_mm": 1.2,
+    "min_webs_per_island": 2,
+    "max_unsupported_span_mm": 20.0,
+}.items():
+    if not hasattr(st.session_state.project.tool, _field):
+        setattr(st.session_state.project.tool, _field, _default)
+
+
+def _sync_generator() -> None:
+    """Keep the selected generator and project model in lockstep on every rerun."""
+    st.session_state.project.tool.generator = st.session_state.tool_generator
+
 
 with st.sidebar:
     st.header("Project")
@@ -155,6 +167,10 @@ with st.sidebar:
             chosen = next(p for p in saved if p.parent.name == selected)
             st.session_state.project = load_project(chosen)
             st.session_state.source_data = read_project_source(chosen)
+            # The selector is a persistent widget; explicitly hydrate it for a
+            # different project before the next render.
+            st.session_state.tool_generator = st.session_state.project.tool.generator
+            st.session_state._generator_project_identity = id(st.session_state.project)
             st.rerun()
     if st.button("Save project"):
         try:
@@ -205,10 +221,17 @@ with left:
 with middle:
     st.subheader("Tool")
     tool = project.tool
-    tool.generator = st.selectbox("Generator", GENERATORS, index=GENERATORS.index(tool.generator))
+    # Rehydrate the persistent selector when projects change, preventing a
+    # previous project's widget state from overriding the new generator.
+    if st.session_state.get("_generator_project_identity") != id(project):
+        st.session_state.tool_generator = tool.generator
+        st.session_state._generator_project_identity = id(project)
+    tool.generator = st.selectbox(
+        "Generator", GENERATORS, key="tool_generator", on_change=_sync_generator
+    )
     tool.blade_height_mm = st.slider("Blade / body height (mm)", 2.0, 30.0, tool.blade_height_mm, 0.5)
     tool.blade_thickness_mm = st.slider("Wall thickness (mm)", 0.4, 4.0, tool.blade_thickness_mm, 0.1)
-    if tool.generator in {"Cookie cutter", "Imprint cutter", "Cutter + stamp", "Sandwich sealer", "Multi-cutter"}:
+    if tool.generator in CUTTER_GENERATORS:
         tool.sharp_tip = st.toggle("Sharp cutting tip", tool.sharp_tip)
         if tool.sharp_tip:
             tool.tip_width_mm = st.slider("Tip width (mm)", 0.2, 1.5, tool.tip_width_mm, 0.05)
@@ -221,10 +244,17 @@ with middle:
         tool.imprint_depth_mm = st.slider("Imprint depth (mm)", 0.5, 6.0, tool.imprint_depth_mm, 0.25)
         tool.imprint_thickness_mm = st.slider("Imprint thickness (mm)", 0.4, 3.0, tool.imprint_thickness_mm, 0.1)
         tool.relief_height_mm = st.slider("Stamp relief (mm)", 0.5, 8.0, tool.relief_height_mm, 0.25)
-    tool.center_bars = st.selectbox("Low-profile bridge placement", ["Auto", "None", "Horizontal", "Vertical"], index=["Auto", "None", "Horizontal", "Vertical"].index(tool.center_bars))
-    tool.center_bar_width_mm = st.slider("Bridge width (mm)", 0.6, 4.0, tool.center_bar_width_mm, 0.1)
-    if tool.center_bars != "None":
-        tool.bridge_height_mm = st.slider("Bridge height (mm)", 0.4, 4.0, tool.bridge_height_mm, 0.1)
+    if tool.generator in CUTTER_GENERATORS:
+        tool.center_bars = st.selectbox(
+            "Low-profile bridge placement", ["Auto", "None", "Horizontal", "Vertical"],
+            index=["Auto", "None", "Horizontal", "Vertical"].index(tool.center_bars),
+        )
+        if tool.center_bars != "None":
+            tool.center_bar_width_mm = st.slider("Bridge width (mm)", 0.6, 4.0, tool.center_bar_width_mm, 0.1)
+            tool.bridge_height_mm = st.slider("Bridge height (mm)", 0.4, 4.0, tool.bridge_height_mm, 0.1)
+            tool.min_webs_per_island = st.slider("Minimum webs per floating island", 2, 4, tool.min_webs_per_island)
+            tool.max_unsupported_span_mm = st.slider("Maximum unsupported span (mm)", 8.0, 40.0, tool.max_unsupported_span_mm, 1.0)
+            st.caption("Auto adds extra shallow webs for larger or more distant floating cutter walls.")
     tool.mirror = st.toggle("Mirror design", tool.mirror)
 
 with right:
@@ -265,7 +295,7 @@ with workspace_inspector:
     st.metric("Depth", f"{mesh.extents[2]:.1f} mm")
     st.caption(f"{len(model.components)} components")
     if model.bridge_analysis.required:
-        st.caption(f"{model.bridge_analysis.bridge_count} support web(s) · {'connected' if model.bridge_analysis.connected else 'disconnected'}")
+        st.caption(f"{model.bridge_analysis.bridge_count} support web(s) across {model.bridge_analysis.isolated_islands} floating island(s) · {'connected' if model.bridge_analysis.connected else 'disconnected'}")
 
 st.subheader("3D preview")
 st.caption(f"{len(model.components)} components · {mesh.extents[0]:.1f} × {mesh.extents[1]:.1f} × {mesh.extents[2]:.1f} mm")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -15,12 +16,17 @@ from .models import ToolSettings
 class BridgeAnalysis:
     wall_components: int = 1
     bridge_count: int = 0
+    island_web_counts: tuple[int, ...] = ()
     connected: bool = True
     enabled: bool = False
 
     @property
     def required(self) -> bool:
         return self.wall_components > 1
+
+    @property
+    def isolated_islands(self) -> int:
+        return max(0, self.wall_components - 1)
 
 
 @dataclass
@@ -65,11 +71,71 @@ def _bridge_path(start, end, mode: str) -> LineString:
     return LineString([start, end])
 
 
-def _low_profile_bridges(wall, mode: str, width: float) -> tuple[object, BridgeAnalysis]:
-    """Connect every cutter-wall island with a minimum spanning support web.
+def _island_span(piece) -> float:
+    minx, miny, maxx, maxy = piece.bounds
+    return max(maxx - minx, maxy - miny)
 
-    The web overlaps its adjacent walls, is extruded only near the blade top,
-    and is therefore structurally useful without obstructing the cutting edge.
+
+def _web_requirement(piece, primary, settings: ToolSettings) -> int:
+    """Determine a conservative web count for one floating cutter-wall island."""
+    span = _island_span(piece)
+    distance = piece.distance(primary)
+    # Two separated attachment points are the safe baseline. Larger islands and
+    # islands farther from the primary cutter wall receive more support.
+    by_span = math.ceil(span / max(settings.max_unsupported_span_mm, 1.0))
+    by_distance = math.ceil(distance / max(settings.max_unsupported_span_mm, 1.0))
+    return max(int(settings.min_webs_per_island), 2, by_span, by_distance)
+
+
+def _web_candidates(piece, primary, mode: str, width: float):
+    """Sample distinct attachment points around an island and rank short paths."""
+    boundary = piece.exterior
+    sample_count = max(36, min(120, int(boundary.length / max(width * 0.5, 0.2))))
+    candidates = []
+    seen = set()
+    for index in range(sample_count):
+        start = boundary.interpolate(index / sample_count, normalized=True)
+        _, end = nearest_points(start, primary)
+        distance = start.distance(end)
+        if distance <= width * 0.25:
+            continue
+        key = (round(start.x, 3), round(start.y, 3), round(end.x, 3), round(end.y, 3))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append((distance, start, end, _bridge_path(start, end, mode)))
+    return sorted(candidates, key=lambda candidate: candidate[0])
+
+
+def _choose_island_webs(piece, primary, mode: str, width: float, required: int):
+    """Choose separated web anchors so an island cannot hinge on one thin neck."""
+    candidates = _web_candidates(piece, primary, mode, width)
+    if not candidates:
+        raise ValueError("No valid support-web attachment points were found for a floating cutter island.")
+    span = _island_span(piece)
+    min_separation = max(width * 2.0, min(span * 0.28, 10.0))
+    selected = []
+    for candidate in candidates:
+        if not selected or all(candidate[1].distance(existing[1]) >= min_separation for existing in selected):
+            selected.append(candidate)
+        if len(selected) == required:
+            return selected
+    # Very small or irregular islands may not have widely-spaced sample points.
+    # Preserve distinct anchors rather than silently under-supporting them.
+    for candidate in candidates:
+        if candidate not in selected:
+            selected.append(candidate)
+        if len(selected) == required:
+            return selected
+    raise ValueError("Automatic support webs could not find enough distinct attachments for a floating cutter island.")
+
+
+def _low_profile_bridges(wall, mode: str, width: float, settings: ToolSettings) -> tuple[object, BridgeAnalysis]:
+    """Attach every isolated cutter wall with two or more shallow structural webs.
+
+    Each island is connected directly to the primary cutter wall. This prevents a
+    floating loop from acting as a fragile hinge while retaining a clear cutting
+    edge below the web layer.
     """
     pieces = _polygons(wall)
     count = len(pieces)
@@ -78,27 +144,20 @@ def _low_profile_bridges(wall, mode: str, width: float) -> tuple[object, BridgeA
     if mode == "None":
         return GeometryCollection(), BridgeAnalysis(wall_components=count, connected=False, enabled=False)
 
-    # Prim's algorithm: join all disconnected walls using the shortest total web.
-    main = max(range(count), key=lambda index: pieces[index].area)
-    connected = {main}
-    remaining = set(range(count)) - connected
+    primary_index = max(range(count), key=lambda index: pieces[index].area)
+    primary = pieces[primary_index]
     bridge_shapes = []
+    island_counts = []
     bridge_width = max(float(width), 0.01)
-    while remaining:
-        best = None
-        for left in connected:
-            for right in remaining:
-                start, end = nearest_points(pieces[left], pieces[right])
-                distance = start.distance(end)
-                candidate = (distance, left, right, start, end)
-                if best is None or candidate[0] < best[0]:
-                    best = candidate
-        _, left, right, start, end = best
-        path = _bridge_path(start, end, mode)
-        # Square caps overlap both cutter walls, producing a printable fused web.
-        bridge_shapes.append(path.buffer(bridge_width / 2, cap_style=3, join_style=2))
-        connected.add(right)
-        remaining.remove(right)
+    for index, piece in enumerate(pieces):
+        if index == primary_index:
+            continue
+        needed = _web_requirement(piece, primary, settings)
+        selected = _choose_island_webs(piece, primary, mode, bridge_width, needed)
+        island_counts.append(len(selected))
+        for _, _, _, path in selected:
+            # Square caps deliberately overlap both walls, creating a fused web.
+            bridge_shapes.append(path.buffer(bridge_width / 2, cap_style=3, join_style=2))
 
     bridges = unary_union(bridge_shapes).buffer(0)
     merged = unary_union([wall, bridges]).buffer(0)
@@ -106,6 +165,7 @@ def _low_profile_bridges(wall, mode: str, width: float) -> tuple[object, BridgeA
     analysis = BridgeAnalysis(
         wall_components=count,
         bridge_count=len(bridge_shapes),
+        island_web_counts=tuple(island_counts),
         connected=is_connected,
         enabled=True,
     )
@@ -142,7 +202,7 @@ def generate(outline, settings: ToolSettings) -> GeneratedModel:
     wall = _wall(outline, settings.blade_thickness_mm)
     cutter_generators = {"Cookie cutter", "Imprint cutter", "Cutter + stamp", "Sandwich sealer", "Multi-cutter"}
     if g in cutter_generators:
-        bridges, bridge_analysis = _low_profile_bridges(wall, settings.center_bars, settings.center_bar_width_mm)
+        bridges, bridge_analysis = _low_profile_bridges(wall, settings.center_bars, settings.center_bar_width_mm, settings)
     else:
         bridges, bridge_analysis = GeometryCollection(), BridgeAnalysis()
     components: dict[str, trimesh.Trimesh] = {}

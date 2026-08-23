@@ -33,6 +33,8 @@ class ToolSettings:
     center_bars: str = "Auto"
     center_bar_width_mm: float = 1.5
     bridge_height_mm: float = 1.2
+    min_webs_per_island: int = 2
+    max_unsupported_span_mm: float = 20.0
     mirror: bool = False
 
 

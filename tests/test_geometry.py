@@ -58,9 +58,34 @@ def test_auto_support_webs_connect_every_isolated_wall_with_minimum_count():
 
     assert model.bridge_analysis.required
     assert model.bridge_analysis.connected
-    assert model.bridge_analysis.bridge_count == model.bridge_analysis.wall_components - 1
+    assert model.bridge_analysis.bridge_count >= 2 * (model.bridge_analysis.wall_components - 1)
+    assert all(count >= 2 for count in model.bridge_analysis.island_web_counts)
     assert "bridge" in model.components
     assert model.components["bridge"].bounds[0, 2] == pytest.approx(14.0)
+
+def test_large_or_distant_island_receives_more_than_the_two_web_baseline():
+    outline = MultiPolygon([
+        Polygon([(0, 0), (30, 0), (30, 30), (0, 30)]),
+        Polygon([(100, 0), (150, 0), (150, 50), (100, 50)]),
+    ])
+    settings = ToolSettings(max_unsupported_span_mm=20.0)
+    model = generate(outline, settings)
+
+    assert model.bridge_analysis.connected
+    assert model.bridge_analysis.island_web_counts[0] > 2
+    assert model.bridge_analysis.bridge_count == model.bridge_analysis.island_web_counts[0]
+
+
+def test_two_webs_are_separated_across_a_floating_inner_loop():
+    outline = Polygon(
+        [(0, 0), (60, 0), (60, 60), (0, 60)],
+        holes=[[(22, 22), (38, 22), (38, 38), (22, 38)]],
+    )
+    model = generate(outline, ToolSettings())
+
+    assert model.bridge_analysis.island_web_counts == (2,)
+    assert model.components["bridge"].bounds[1, 2] == pytest.approx(15.0)
+    assert model.export_error is None
 
 
 def test_disabled_support_web_reports_disconnected_cutter_walls():

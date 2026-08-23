@@ -21,7 +21,12 @@ def validate(mesh, settings: ToolSettings, printer: PrinterProfile, bridge_analy
         messages.append(("error", f"Export blocked: {export_error}"))
     if bridge_analysis and bridge_analysis.required:
         if bridge_analysis.connected:
-            messages.append(("success", f"{bridge_analysis.bridge_count} low-profile support web(s) connect all cutter walls."))
+            per_island = ", ".join(str(count) for count in bridge_analysis.island_web_counts)
+            messages.append((
+                "success",
+                f"{bridge_analysis.bridge_count} low-profile support web(s) connect all cutter walls "
+                f"({per_island} web(s) per floating island).",
+            ))
         else:
             messages.append(("warning", "Disconnected cutter walls have no support web and will print as separate pieces."))
     if bridge_analysis and bridge_analysis.enabled and settings.center_bar_width_mm < min_feature:

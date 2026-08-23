@@ -5,13 +5,15 @@ def test_project_round_trip():
     project = DesignProject(
         name="Dog cutter",
         trace=TraceSettings(target_width_mm=60),
-        tool=ToolSettings(generator="Stamp"),
+        tool=ToolSettings(generator="Stamp", min_webs_per_island=3, max_unsupported_span_mm=16.0),
         printer=PrinterProfile(name="Anycubic Kobra S1"),
     )
     restored = DesignProject.from_dict(project.to_dict())
     assert restored.name == "Dog cutter"
     assert restored.trace.target_width_mm == 60
     assert restored.tool.generator == "Stamp"
+    assert restored.tool.min_webs_per_island == 3
+    assert restored.tool.max_unsupported_span_mm == 16.0
     assert restored.printer.name == "Anycubic Kobra S1"
 
 
