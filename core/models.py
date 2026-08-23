@@ -35,6 +35,8 @@ class ToolSettings:
     bridge_height_mm: float = 1.2
     min_webs_per_island: int = 2
     max_unsupported_span_mm: float = 20.0
+    support_web_mode: str = "Auto"
+    manual_webs: list[dict[str, Any]] = field(default_factory=list)
     mirror: bool = False
 
 

@@ -99,8 +99,8 @@ def build_batch_zip(files, trace, tool, fmt: str) -> tuple[bytes, int, list[str]
     return archive.getvalue(), written, errors
 
 
-def workspace_canvas(model) -> str:
-    """Return a self-contained local 3D viewport with inspection controls."""
+def workspace_canvas(model, generator: str, target_width_mm: float) -> str:
+    """Return a self-contained workspace with a clean, unobstructed 3D grid."""
     component_data = []
     component_count = max(1, len(model.components))
     per_component_limit = max(1200, 9000 // component_count)
@@ -108,18 +108,37 @@ def workspace_canvas(model) -> str:
         faces = component.faces.tolist()
         if len(faces) > per_component_limit:
             faces = faces[::max(1, len(faces) // per_component_limit)]
-        component_data.append({"name": name.replace("_", " ").title(), "vertices": component.vertices.round(4).tolist(), "faces": faces})
-    payload = json.dumps({"components": component_data, "dimensions": model.mesh.extents.round(2).tolist()})
+        display_name = {"bridge": "Contour gussets", "manual bridge": "Manual contour gussets"}.get(name, name.replace("_", " ").title())
+        component_data.append({"name": display_name, "vertices": component.vertices.round(4).tolist(), "faces": faces})
+    support_summary = ""
+    if model.bridge_analysis.required:
+        support_summary = (
+            f"{model.bridge_analysis.bridge_count} support web(s) across "
+            f"{model.bridge_analysis.isolated_islands} floating island(s) · "
+            f"{'connected' if model.bridge_analysis.connected else 'disconnected'}"
+        )
+    payload = json.dumps({
+        "components": component_data,
+        "dimensions": model.mesh.extents.round(2).tolist(),
+        "generator": generator,
+        "target_width": round(target_width_mm),
+        "support_summary": support_summary,
+        "web_summary": f"{model.bridge_analysis.automatic_web_count} automatic · {model.bridge_analysis.manual_web_count} manual" if model.bridge_analysis.required else "",
+    })
     template = """
 <!doctype html><html><head><style>
 * { box-sizing: border-box; } body { margin: 0; background: #fffafb; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
-#stage { position: relative; height: 560px; overflow: hidden; border: 1px solid #e5cdd3; border-radius: 12px; background: radial-gradient(circle at 50% 35%, #fffdfd, #f9e9ed); }
-canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; } canvas:active { cursor: grabbing; }
-.toolbar { position: absolute; top: 14px; left: 14px; z-index: 2; display: flex; gap: 7px; flex-wrap: wrap; max-width: 62%; } button, select { border: 1px solid #d9aeb9; border-radius: 7px; background: #fffdfd; color: #282d32; padding: 7px 10px; font-size: 13px; cursor: pointer; } button:hover, select:hover { background: #f6e5e9; }
-.panel { position: absolute; top: 14px; right: 14px; z-index: 2; min-width: 155px; border: 1px solid #e5cdd3; border-radius: 8px; background: rgba(255,253,253,.94); padding: 10px; color: #66575b; font-size: 12px; } .panel strong { color: #282d32; display:block; margin-bottom:7px; } .panel label { display:block; margin:6px 0; cursor:pointer; } .panel input { accent-color:#d8a6b4; vertical-align:middle; }
-.hint { position: absolute; bottom: 14px; left: 14px; z-index: 2; border-radius: 6px; background: rgba(255,253,253,.92); color: #66575b; padding: 6px 9px; font-size: 12px; } #dimensions { position:absolute; bottom:14px; right:14px; z-index:2; background:rgba(255,253,253,.92); border:1px solid #e5cdd3; border-radius:6px; padding:7px 9px; color:#66575b; font-size:12px; }
-</style></head><body><div id="stage"><div class="toolbar"><button onclick="setView(0,0)">Front</button><button onclick="setView(0,-1.5708)">Side</button><button onclick="setView(-1.5708,0)">Top</button><button onclick="resetView()">Reset</button><select id="material" aria-label="Material appearance"><option value="Porcelain">Porcelain</option><option value="Clay">Clay</option><option value="Stone">Stone</option><option value="Graphite">Graphite</option></select><button id="edges">Edges: On</button><button id="dimensionsToggle">Dimensions: On</button></div><canvas id="canvas"></canvas><div id="components" class="panel"><strong>Components</strong></div><div class="hint">Drag to orbit · Shift + drag to pan · scroll to zoom</div><div id="dimensions">Dimensions</div></div><script>
+#workspace { display:grid; grid-template-columns:180px minmax(360px,1fr) 215px; gap:18px; align-items:start; min-height:560px; }
+.shelf, .inspector { color:#66575b; font-size:13px; padding:8px 2px; } .eyebrow { color:#8b7a7e; font-size:11px; letter-spacing:.06em; margin-bottom:16px; } .shelf strong { display:block; color:#282d32; font-size:16px; margin-bottom:24px; } .shelf .meta { line-height:1.45; margin:17px 0 23px; } .shelf .meta b { color:#66575b; font-weight:600; }
+#stage { height:510px; overflow:hidden; border:1px solid #e5cdd3; border-radius:12px; background:radial-gradient(circle at 50% 35%,#fffdfd,#f9e9ed); } canvas { width:100%; height:100%; display:block; cursor:grab; touch-action:none; } canvas:active { cursor:grabbing; }
+.toolbar { display:flex; gap:7px; flex-wrap:wrap; margin-top:12px; } button, select { border:1px solid #d9aeb9; border-radius:7px; background:#fffdfd; color:#282d32; padding:7px 10px; font-size:13px; cursor:pointer; } button:hover, select:hover { background:#f6e5e9; }
+.panel { min-width:155px; border:1px solid #e5cdd3; border-radius:8px; background:rgba(255,253,253,.94); padding:10px; color:#66575b; font-size:12px; margin-top:22px; } .panel strong { color:#282d32; display:block; margin-bottom:7px; } .panel label { display:block; margin:6px 0; cursor:pointer; } .panel input { accent-color:#d8a6b4; vertical-align:middle; }
+.metric { color:#75646a; margin:17px 0 6px; } .metric b { display:block; color:#66575b; font-size:25px; font-weight:500; margin-top:3px; } .summary { color:#75646a; line-height:1.45; margin-top:18px; }
+.status { display:flex; justify-content:space-between; gap:8px; margin-top:10px; color:#66575b; font-size:12px; } .hint, #dimensions { border-radius:6px; background:rgba(255,253,253,.92); border:1px solid #e5cdd3; padding:7px 9px; } .hint { border-color:transparent; }
+@media(max-width:760px) { #workspace { grid-template-columns:1fr; } #stage { height:460px; } .panel { margin-top:12px; } }
+</style></head><body><div id="workspace"><section class="shelf"><div class="eyebrow">TOOL SHELF</div><strong id="toolTitle"></strong><div class="meta">Workplane<br><b id="workplane"></b></div><div class="meta">Mode<br><b>Trace → tool</b></div><div class="eyebrow" style="margin-top:30px">VIEW</div><div class="toolbar"><button onclick="setView(0,0)">Front</button><button onclick="setView(0,-1.5708)">Side</button><button onclick="setView(-1.5708,0)">Top</button><button onclick="resetView()">Reset</button><select id="material" aria-label="Material appearance"><option value="Porcelain">Porcelain</option><option value="Clay">Clay</option><option value="Stone">Stone</option><option value="Graphite">Graphite</option></select><button id="edges">Edges: On</button><button id="dimensionsToggle">Dimensions: On</button></div></section><section><div id="stage"><canvas id="canvas"></canvas></div><div class="status"><div class="hint">Drag to orbit · Shift + drag to pan · scroll to zoom</div><div id="dimensions">Dimensions</div></div></section><section class="inspector"><div class="eyebrow">INSPECTOR</div><div class="metric">Width<b id="widthMetric"></b></div><div class="metric">Height<b id="heightMetric"></b></div><div class="metric">Depth<b id="depthMetric"></b></div><div class="summary" id="componentCount"></div><div class="summary" id="supportSummary"></div><div class="summary" id="webSummary"></div><div id="components" class="panel"><strong>Components</strong></div></section></div><script>
 const model = __MODEL__; const canvas = document.getElementById("canvas"), ctx = canvas.getContext("2d"), componentPanel=document.getElementById("components"), materialSelect=document.getElementById("material"), edgeButton=document.getElementById("edges"), dimensionToggle=document.getElementById("dimensionsToggle"), dimensionBox=document.getElementById("dimensions");
+document.getElementById("toolTitle").textContent=model.generator; document.getElementById("workplane").textContent=`${model.target_width} mm wide`; document.getElementById("widthMetric").textContent=`${model.dimensions[0]} mm`; document.getElementById("heightMetric").textContent=`${model.dimensions[1]} mm`; document.getElementById("depthMetric").textContent=`${model.dimensions[2]} mm`; document.getElementById("componentCount").textContent=`${model.components.length} components`; document.getElementById("supportSummary").textContent=model.support_summary; document.getElementById("webSummary").textContent=model.web_summary;
 let rx=-0.55, ry=0.7, zoom=1, panX=0, panY=0, drag=null, edges=true, material="Porcelain", showDimensions=true;
 const palettes={Porcelain:[226,211,215],Clay:[205,165,151],Stone:[171,168,163],Graphite:[88,91,95]};
 const allVertices=model.components.flatMap(c=>c.vertices); const bounds=allVertices.reduce((out,p)=>[[Math.min(out[0][0],p[0]),Math.min(out[0][1],p[1]),Math.min(out[0][2],p[2])],[Math.max(out[1][0],p[0]),Math.max(out[1][1],p[1]),Math.max(out[1][2],p[2])]],[[Infinity,Infinity,Infinity],[-Infinity,-Infinity,-Infinity]]); const center=bounds[0].map((v,i)=>(v+bounds[1][i])/2); const extents=bounds[0].map((v,i)=>Math.max(1,(bounds[1][i]-v)/2)); const baseScale=195/Math.max(...extents), light=[.35,-.55,.75];
@@ -146,6 +165,8 @@ for _field, _default in {
     "bridge_height_mm": 1.2,
     "min_webs_per_island": 2,
     "max_unsupported_span_mm": 20.0,
+    "support_web_mode": "Auto",
+    "manual_webs": [],
 }.items():
     if not hasattr(st.session_state.project.tool, _field):
         setattr(st.session_state.project.tool, _field, _default)
@@ -254,7 +275,28 @@ with middle:
             tool.bridge_height_mm = st.slider("Bridge height (mm)", 0.4, 4.0, tool.bridge_height_mm, 0.1)
             tool.min_webs_per_island = st.slider("Minimum webs per floating island", 2, 4, tool.min_webs_per_island)
             tool.max_unsupported_span_mm = st.slider("Maximum unsupported span (mm)", 8.0, 40.0, tool.max_unsupported_span_mm, 1.0)
-            st.caption("Auto adds extra shallow webs for larger or more distant floating cutter walls.")
+            tool.support_web_mode = st.selectbox(
+                "Support-web mode", ["Auto", "Manual", "Auto + manual"],
+                index=["Auto", "Manual", "Auto + manual"].index(tool.support_web_mode),
+            )
+            st.caption("Auto reinforces weak regions. Manual mode exports only when every floating island has enough snapped web attachments.")
+            if tool.support_web_mode in {"Manual", "Auto + manual"}:
+                st.caption("Add a snapped manual web by choosing a floating-island number and attachment region. Island numbers are shown in the support-web review below.")
+                manual_island = st.number_input("Floating island number", min_value=1, max_value=24, value=1, step=1)
+                manual_region = st.selectbox("Manual attachment region", ["Top", "Right", "Bottom", "Left"])
+                if st.button("Add manual support web"):
+                    spec = {"island": int(manual_island), "region": manual_region}
+                    if spec not in tool.manual_webs:
+                        tool.manual_webs.append(spec)
+                    st.rerun()
+                if tool.manual_webs:
+                    st.caption("Manual web requests")
+                    for _index, _spec in enumerate(tool.manual_webs):
+                        _col_label, _col_remove = st.columns([4, 1])
+                        _col_label.caption(f"Island {_spec.get('island', '?')} · {_spec.get('region', 'Top')}")
+                        if _col_remove.button("Remove", key=f"remove_manual_web_{_index}"):
+                            tool.manual_webs.pop(_index)
+                            st.rerun()
     tool.mirror = st.toggle("Mirror design", tool.mirror)
 
 with right:
@@ -278,24 +320,7 @@ except Exception as exc:
     st.stop()
 
 st.subheader("Workspace")
-workspace_tools, workspace_stage, workspace_inspector = st.columns([1, 3, 1])
-with workspace_tools:
-    st.caption("TOOL SHELF")
-    st.markdown(f"**{tool.generator}**")
-    st.caption("Workplane")
-    st.write(f"{trace.target_width_mm:.0f} mm wide")
-    st.caption("Mode")
-    st.write("Trace → tool")
-with workspace_stage:
-    st.components.v1.html(workspace_canvas(model), height=570, scrolling=False)
-with workspace_inspector:
-    st.caption("INSPECTOR")
-    st.metric("Width", f"{mesh.extents[0]:.1f} mm")
-    st.metric("Height", f"{mesh.extents[1]:.1f} mm")
-    st.metric("Depth", f"{mesh.extents[2]:.1f} mm")
-    st.caption(f"{len(model.components)} components")
-    if model.bridge_analysis.required:
-        st.caption(f"{model.bridge_analysis.bridge_count} support web(s) across {model.bridge_analysis.isolated_islands} floating island(s) · {'connected' if model.bridge_analysis.connected else 'disconnected'}")
+st.components.v1.html(workspace_canvas(model, tool.generator, trace.target_width_mm), height=600, scrolling=False)
 
 st.subheader("3D preview")
 st.caption(f"{len(model.components)} components · {mesh.extents[0]:.1f} × {mesh.extents[1]:.1f} × {mesh.extents[2]:.1f} mm")
@@ -334,3 +359,16 @@ if len(uploaded_files or []) > 1:
     )
     if batch_errors:
         st.warning(f"{len(batch_errors)} file(s) could not be generated. Details are included in batch-errors.txt inside the ZIP.")
+
+if model.bridge_analysis.required:
+    st.subheader("Support-web review")
+    if model.bridge_analysis.webs:
+        for _web in model.bridge_analysis.webs:
+            _source = f"({_web.source[0]:.1f}, {_web.source[1]:.1f})"
+            _target = f"({_web.target[0]:.1f}, {_web.target[1]:.1f})"
+            st.caption(f"Island {_web.island_index} · {'Manual' if _web.manual else 'Automatic'} · {_web.reason} · {_source} → {_target}")
+    if model.bridge_analysis.unresolved_reasons:
+        for _reason in model.bridge_analysis.unresolved_reasons:
+            st.warning("Flush support unresolved: " + _reason)
+    elif model.bridge_analysis.under_supported_islands:
+        st.warning("Floating island(s) " + ", ".join(map(str, model.bridge_analysis.under_supported_islands)) + " need more support webs before export.")

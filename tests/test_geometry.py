@@ -3,9 +3,9 @@ import pytest
 shapely = pytest.importorskip("shapely")
 trimesh = pytest.importorskip("trimesh")
 
-from shapely.geometry import MultiPolygon, Polygon
+from shapely.geometry import MultiPolygon, Point, Polygon, box
 
-from core.mesh import export_bytes, generate
+from core.mesh import _boundary_vector_score, _bridge_path, _contour_gusset, _wall, export_bytes, generate
 from core.models import PrinterProfile, ToolSettings
 from core.validation import validate
 
@@ -150,3 +150,162 @@ def test_standard_cutter_export_is_blocked_when_support_webs_are_disabled():
     assert model.export_error
     with pytest.raises(ValueError, match="Disconnected cutter walls"):
         export_bytes(model, "stl")
+
+
+def test_structural_webs_anchor_to_real_cutter_walls_for_concave_island():
+    outline = Polygon(
+        [(0, 0), (100, 0), (100, 100), (0, 100)],
+        holes=[[(35, 30), (65, 30), (65, 42), (48, 42), (48, 70), (35, 70)]],
+    )
+    settings = ToolSettings(max_unsupported_span_mm=20.0)
+    model = generate(outline, settings)
+    wall = _wall(outline, settings.blade_thickness_mm)
+
+    assert model.bridge_analysis.connected
+    assert model.bridge_analysis.island_web_counts[0] >= 2
+    for web in model.bridge_analysis.webs:
+        assert wall.boundary.distance(__import__("shapely", fromlist=["Point"]).Point(web.source)) < 1e-6
+        assert wall.boundary.distance(__import__("shapely", fromlist=["Point"]).Point(web.target)) < 1e-6
+
+
+def test_support_web_routing_handles_multiple_constrained_inner_islands():
+    mode = "Auto"
+    outline = Polygon(
+        [(0, 0), (120, 0), (120, 100), (0, 100)],
+        holes=[
+            [(15, 20), (35, 20), (35, 45), (15, 45)],
+            [(50, 35), (72, 35), (72, 62), (50, 62)],
+            [(85, 15), (108, 15), (108, 52), (85, 52)],
+        ],
+    )
+    model = generate(outline, ToolSettings(center_bars=mode, max_unsupported_span_mm=20.0))
+
+    assert model.bridge_analysis.connected
+    assert all(count >= 2 for count in model.bridge_analysis.island_web_counts)
+    assert model.export_error is None
+    assert model.mesh.is_watertight
+    assert len(model.mesh.split(only_watertight=False)) == 1
+
+
+@pytest.mark.parametrize("mode", ["Horizontal", "Vertical"])
+def test_forced_route_is_blocked_when_it_cannot_make_flush_attachments(mode):
+    outline = Polygon(
+        [(0, 0), (120, 0), (120, 100), (0, 100)],
+        holes=[[(15, 20), (35, 20), (35, 45), (15, 45)]],
+    )
+    model = generate(outline, ToolSettings(center_bars=mode))
+
+    assert model.bridge_analysis.unresolved
+    assert model.bridge_analysis.unresolved_reasons
+    assert model.export_error
+    with pytest.raises(ValueError, match="flush wall-to-wall"):
+        export_bytes(model, "stl")
+
+
+def test_invalid_overlapping_vector_geometry_is_normalized_before_generation():
+    invalid = MultiPolygon([
+        Polygon([(0, 0), (60, 0), (60, 60), (0, 60)]),
+        Polygon([(20, 20), (40, 20), (40, 40), (20, 40)]),
+    ])
+    model = generate(invalid, ToolSettings())
+
+    assert model.mesh.is_watertight
+
+
+def test_manual_support_web_pair_creates_a_safe_exportable_cutter():
+    outline = Polygon(
+        [(0, 0), (60, 0), (60, 60), (0, 60)],
+        holes=[[(20, 20), (40, 20), (40, 40), (20, 40)]],
+    )
+    settings = ToolSettings(
+        support_web_mode="Manual",
+        manual_webs=[{"island": 1, "region": "Top"}, {"island": 1, "region": "Bottom"}],
+    )
+    model = generate(outline, settings)
+
+    assert model.bridge_analysis.island_web_counts == (2,)
+    assert model.bridge_analysis.automatic_web_count == 0
+    assert model.bridge_analysis.manual_web_count == 2
+    assert "manual bridge" in model.components
+    assert model.export_error is None
+    assert export_bytes(model, "stl")
+
+
+def test_manual_mode_blocks_export_when_an_island_has_only_one_web():
+    outline = Polygon(
+        [(0, 0), (60, 0), (60, 60), (0, 60)],
+        holes=[[(20, 20), (40, 20), (40, 40), (20, 40)]],
+    )
+    settings = ToolSettings(support_web_mode="Manual", manual_webs=[{"island": 1, "region": "Top"}])
+    model = generate(outline, settings)
+
+    assert model.bridge_analysis.under_supported_islands == (1,)
+    assert model.export_error
+    with pytest.raises(ValueError, match="flush wall-to-wall"):
+        export_bytes(model, "stl")
+
+
+def test_auto_plus_manual_retains_both_web_types():
+    outline = Polygon(
+        [(0, 0), (60, 0), (60, 60), (0, 60)],
+        holes=[[(20, 20), (40, 20), (40, 40), (20, 40)]],
+    )
+    settings = ToolSettings(support_web_mode="Auto + manual", manual_webs=[{"island": 1, "region": "Left"}])
+    model = generate(outline, settings)
+
+    assert model.bridge_analysis.automatic_web_count >= 2
+    assert model.bridge_analysis.manual_web_count == 1
+    assert model.bridge_analysis.under_supported_islands == ()
+
+
+def test_manual_mode_honors_configured_minimum_web_count():
+    outline = Polygon(
+        [(0, 0), (60, 0), (60, 60), (0, 60)],
+        holes=[[(20, 20), (40, 20), (40, 40), (20, 40)]],
+    )
+    settings = ToolSettings(
+        support_web_mode="Manual", min_webs_per_island=3,
+        manual_webs=[{"island": 1, "region": "Top"}, {"island": 1, "region": "Bottom"}],
+    )
+    model = generate(outline, settings)
+
+    assert model.bridge_analysis.under_supported_islands == (1,)
+    assert model.export_error
+
+
+def test_contour_gusset_has_inset_attachments_and_contour_following_landing_pads():
+    island = box(0, 0, 10, 10)
+    primary = box(20, 0, 30, 10)
+    from shapely.geometry import LineString
+    gusset = _contour_gusset(LineString([(10, 5), (20, 5)]), island, primary, island.exterior, primary.exterior, 1.5)
+
+    assert gusset is not None
+    island_pad = gusset.intersection(island)
+    primary_pad = gusset.intersection(primary)
+    assert island_pad.area > 0 and primary_pad.area > 0
+    # Both pads extend along their vertical wall contours, rather than ending
+    # as the narrow rectangular support strip.
+    assert island_pad.bounds[3] - island_pad.bounds[1] > 1.5
+    assert primary_pad.bounds[3] - primary_pad.bounds[1] > 1.5
+
+
+def test_curvature_vector_score_prefers_a_flat_normal_aligned_wall_segment():
+    wall = box(0, 0, 10, 10).exterior
+    flat_score, flat_curve, flat_alignment = _boundary_vector_score(wall, Point(10, 5), (1, 0))
+    corner_score, corner_curve, corner_alignment = _boundary_vector_score(wall, Point(10, 10), (1, 0))
+
+    assert flat_curve < corner_curve
+    assert flat_alignment >= corner_alignment
+    assert flat_score > corner_score
+
+
+def test_auto_gussets_report_curvature_aware_structural_reasons():
+    outline = Polygon(
+        [(0, 0), (100, 0), (100, 100), (0, 100)],
+        holes=[[(30, 30), (70, 30), (70, 70), (30, 70)]],
+    )
+    model = generate(outline, ToolSettings())
+
+    assert model.bridge_analysis.webs
+    assert model.bridge_analysis.webs[0].reason == "low-curvature, normal-aligned primary anchor"
+    assert model.bridge_analysis.webs[1].reason == "separated low-curvature secondary anchor"

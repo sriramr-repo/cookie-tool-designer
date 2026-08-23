@@ -25,8 +25,14 @@ def validate(mesh, settings: ToolSettings, printer: PrinterProfile, bridge_analy
             messages.append((
                 "success",
                 f"{bridge_analysis.bridge_count} low-profile support web(s) connect all cutter walls "
-                f"({per_island} web(s) per floating island).",
+                f"({per_island} web(s) per floating island; {bridge_analysis.automatic_web_count} automatic, "
+                f"{bridge_analysis.manual_web_count} manual).",
             ))
+            if bridge_analysis.unresolved_reasons:
+                for reason in bridge_analysis.unresolved_reasons:
+                    messages.append(("error", f"Flush support unresolved: {reason}"))
+            elif bridge_analysis.under_supported_islands:
+                messages.append(("error", f"One or more floating islands have fewer than {bridge_analysis.minimum_required_webs} support webs."))
         else:
             messages.append(("warning", "Disconnected cutter walls have no support web and will print as separate pieces."))
     if bridge_analysis and bridge_analysis.enabled and settings.center_bar_width_mm < min_feature:
