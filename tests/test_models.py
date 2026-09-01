@@ -1,3 +1,4 @@
+from core.exporters import export_filename
 from core.models import DesignProject, PrinterProfile, ToolSettings, TraceSettings
 
 
@@ -23,3 +24,8 @@ def test_default_printer_profile_is_anycubic_kobra_s1():
     assert profile.name == "Anycubic Kobra S1"
     assert profile.nozzle_mm == 0.4
     assert (profile.build_x_mm, profile.build_y_mm, profile.build_z_mm) == (250.0, 250.0, 250.0)
+
+
+def test_export_filename_is_safe_and_deterministic():
+    assert export_filename("my design!.png", "stl") == "my_design_.stl"
+    assert export_filename(".svg", "3mf") == "_svg.3mf"

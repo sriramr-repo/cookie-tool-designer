@@ -6,9 +6,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import trimesh
+from shapely import set_precision
 from shapely.geometry import GeometryCollection, LineString, Point, Polygon
 from shapely.ops import nearest_points, unary_union
 
+from .catalog import CUTTER_GENERATORS, ONE_PIECE_CUTTER_GENERATORS
 from .models import ToolSettings
 
 
@@ -62,11 +64,12 @@ class GeneratedModel:
     components: dict[str, trimesh.Trimesh]
     bridge_analysis: BridgeAnalysis = field(default_factory=BridgeAnalysis)
     structural_mesh: trimesh.Trimesh | None = None
+    export_mesh: trimesh.Trimesh | None = None
     export_error: str | None = None
 
     @property
     def mesh(self) -> trimesh.Trimesh:
-        return self.structural_mesh or trimesh.util.concatenate(list(self.components.values()))
+        return self.export_mesh or self.structural_mesh or trimesh.util.concatenate(list(self.components.values()))
 
 
 def _polygons(shape):
@@ -77,8 +80,30 @@ def _polygons(shape):
     return [x for x in getattr(shape, "geoms", []) if isinstance(x, Polygon)]
 
 
+def _extrude_polygon_solid(polygon: Polygon, height: float) -> trimesh.Trimesh:
+    """Extrude a polygon as a watertight solid, including contours with holes."""
+    # Boolean/gusset operations can leave coordinates separated by only floating
+    # point noise. Snap at a sub-micron scale to remove zero-length seam edges
+    # without changing printable dimensions or the visible contour.
+    polygon = set_precision(polygon, 1e-8, mode="valid_output")
+    if polygon.is_empty or not isinstance(polygon, Polygon):
+        raise ValueError("No printable polygon remains after topology normalization.")
+    if not polygon.interiors:
+        result = trimesh.creation.extrude_polygon(polygon, height)
+    else:
+        # Direct hole extrusion can create an ambiguous shared seam. Construct
+        # the same ring as a solid difference rather than asking slicers to
+        # repair a non-manifold mesh.
+        outer = trimesh.creation.extrude_polygon(Polygon(polygon.exterior), height)
+        holes = [trimesh.creation.extrude_polygon(Polygon(ring), height) for ring in polygon.interiors]
+        result = trimesh.boolean.difference([outer, *holes], engine="manifold", check_volume=False)
+    if result is None or not result.is_watertight:
+        raise ValueError("Could not construct a watertight printable solid.")
+    return result
+
+
 def extrude(shape, height: float, z: float = 0.0) -> trimesh.Trimesh:
-    meshes = [trimesh.creation.extrude_polygon(p, height) for p in _polygons(shape)]
+    meshes = [_extrude_polygon_solid(polygon, height) for polygon in _polygons(shape)]
     if not meshes:
         raise ValueError("No printable area was generated.")
     result = trimesh.util.concatenate(meshes)
@@ -408,6 +433,33 @@ def _low_profile_bridges(wall, mode: str, width: float, settings: ToolSettings) 
     return bridges, automatic_bridges, manual_bridges, analysis
 
 
+def _imprint_support_gussets(details, wall, settings: ToolSettings):
+    """Connect imprint relief to the cutter wall with required flush gussets."""
+    shapes = []
+    width = max(float(settings.center_bar_width_mm), 0.01)
+    detail_pieces = _polygons(details)
+    for piece in detail_pieces:
+        obstacles = [other for other in detail_pieces if other is not piece]
+        required = _web_requirement(piece, wall, settings)
+        candidates = _choose_island_webs(piece, wall, obstacles, "Auto", width, required)
+        if len(candidates) < required:
+            raise ValueError(
+                "Imprint detail cannot be safely connected to the cutter wall with flush support webs. "
+                "Adjust the trace or wall thickness."
+            )
+        shapes.extend(candidate[5] for candidate in candidates)
+    return unary_union(shapes).buffer(0) if shapes else GeometryCollection()
+
+
+def _multipart_export(parts: list[trimesh.Trimesh], expected_bodies: int) -> trimesh.Trimesh:
+    """Combine intentionally separate solids and validate their topology."""
+    result = trimesh.util.concatenate(parts)
+    bodies = result.split(only_watertight=False)
+    if not result.is_watertight or len(bodies) != expected_bodies or any(not body.is_watertight for body in bodies):
+        raise ValueError("Export topology does not contain the expected watertight printable bodies.")
+    return result
+
+
 def _center_bar(shape, mode: str, width: float):
     if mode == "None" or shape.geom_type != "MultiPolygon":
         return shape
@@ -438,8 +490,7 @@ def generate(outline, settings: ToolSettings) -> GeneratedModel:
         outline = affinity.scale(outline, xfact=-1, yfact=1, origin="center")
     g = settings.generator
     wall = _wall(outline, settings.blade_thickness_mm)
-    cutter_generators = {"Cookie cutter", "Imprint cutter", "Cutter + stamp", "Sandwich sealer", "Multi-cutter"}
-    if g in cutter_generators:
+    if g in CUTTER_GENERATORS:
         bridges, automatic_bridges, manual_bridges, bridge_analysis = _low_profile_bridges(
             wall, settings.center_bars, settings.center_bar_width_mm, settings
         )
@@ -448,8 +499,9 @@ def generate(outline, settings: ToolSettings) -> GeneratedModel:
         bridge_analysis = BridgeAnalysis()
     components: dict[str, trimesh.Trimesh] = {}
     structural_mesh = None
+    export_mesh = None
     export_error = None
-    if g in cutter_generators:
+    if g in CUTTER_GENERATORS:
         components["cutter"] = extrude(wall, settings.blade_height_mm)
         bridge_height = min(settings.bridge_height_mm, settings.blade_height_mm)
         if not automatic_bridges.is_empty:
@@ -465,6 +517,13 @@ def generate(outline, settings: ToolSettings) -> GeneratedModel:
         if g == "Imprint cutter":
             details = outline.buffer(-settings.blade_thickness_mm * 1.25)
             components["imprint"] = extrude(details, settings.imprint_depth_mm, settings.blade_height_mm - settings.imprint_depth_mm)
+            imprint_gussets = _imprint_support_gussets(details, wall, settings)
+            if not imprint_gussets.is_empty:
+                components["imprint bridge"] = extrude(
+                    imprint_gussets,
+                    settings.imprint_depth_mm,
+                    settings.blade_height_mm - settings.imprint_depth_mm,
+                )
     elif g in {"Stamp", "Embosser", "Debosser", "Cake-pop mold"}:
         base = outline.buffer(settings.handle_width_mm)
         components["base"] = extrude(base, settings.handle_height_mm)
@@ -483,9 +542,9 @@ def generate(outline, settings: ToolSettings) -> GeneratedModel:
         stamp_base = outline.buffer(settings.clearance_mm + settings.handle_width_mm)
         components["stamp"] = extrude(stamp_base, settings.handle_height_mm)
 
-    # These generators promise a single printable cutter body. Other recipes may
-    # deliberately contain separate functional pieces (such as a stamp set).
-    one_piece_generators = {"Cookie cutter", "Sandwich sealer", "Multi-cutter"}
+    # Single-tool recipes are fused before export so overlapping visual
+    # components never leave the slicer to infer their physical connection.
+    one_piece_generators = {*ONE_PIECE_CUTTER_GENERATORS, "Imprint cutter", "Stamp", "Embosser", "Debosser", "Cake-pop mold"}
     if g in one_piece_generators:
         if bridge_analysis.required and bridge_analysis.unresolved:
             details = "; ".join(bridge_analysis.unresolved_reasons)
@@ -496,8 +555,28 @@ def generate(outline, settings: ToolSettings) -> GeneratedModel:
                 structural_mesh = _fuse_one_piece(list(components.values()))
             except ValueError as exc:
                 export_error = str(exc)
-    return GeneratedModel(components, bridge_analysis, structural_mesh, export_error)
-
+    elif g == "Cutter + stamp":
+        if bridge_analysis.required and bridge_analysis.unresolved:
+            export_error = "; ".join(bridge_analysis.unresolved_reasons) or "Disconnected cutter walls require flush support webs before export."
+        else:
+            try:
+                cutter_parts = [mesh for name, mesh in components.items() if name != "stamp"]
+                cutter_body = _fuse_one_piece(cutter_parts)
+                export_mesh = _multipart_export([cutter_body, components["stamp"]], expected_bodies=2)
+            except ValueError as exc:
+                export_error = str(exc)
+    elif g == "Stencil":
+        try:
+            structural_mesh = _multipart_export([components["stencil"]], expected_bodies=1)
+        except ValueError as exc:
+            export_error = str(exc)
+    return GeneratedModel(
+        components=components,
+        bridge_analysis=bridge_analysis,
+        structural_mesh=structural_mesh,
+        export_mesh=export_mesh,
+        export_error=export_error,
+    )
 
 def export_bytes(model: GeneratedModel, fmt: str) -> bytes:
     if model.export_error:

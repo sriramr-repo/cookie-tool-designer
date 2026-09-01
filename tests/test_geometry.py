@@ -309,3 +309,31 @@ def test_auto_gussets_report_curvature_aware_structural_reasons():
     assert model.bridge_analysis.webs
     assert model.bridge_analysis.webs[0].reason == "low-curvature, normal-aligned primary anchor"
     assert model.bridge_analysis.webs[1].reason == "separated low-curvature secondary anchor"
+
+
+def test_all_generator_exports_have_intentional_watertight_topology():
+    outline = box(0, 0, 24, 18)
+    expected_bodies = {
+        "Cookie cutter": 1,
+        "Imprint cutter": 1,
+        "Stamp": 1,
+        "Embosser": 1,
+        "Debosser": 1,
+        "Cutter + stamp": 2,
+        "Stencil": 1,
+        "Cake topper": 1,
+        "Sandwich sealer": 1,
+        "Multi-cutter": 1,
+        "Cake-pop mold": 1,
+    }
+    for generator, body_count in expected_bodies.items():
+        model = generate(outline, ToolSettings(generator=generator))
+        assert model.export_error is None
+        assert model.mesh.is_watertight
+        bodies = model.mesh.split(only_watertight=False)
+        assert len(bodies) == body_count
+        assert all(body.is_watertight for body in bodies)
+        assert all(component.is_watertight for component in model.components.values())
+
+    imprint = generate(outline, ToolSettings(generator="Imprint cutter"))
+    assert "imprint bridge" in imprint.components
