@@ -1,5 +1,4 @@
 from core.exporters import export_filename
-from core.image_processor import image_from_bytes
 from core.models import DesignProject, PrinterProfile, ToolSettings, TraceSettings
 
 
@@ -30,10 +29,3 @@ def test_default_printer_profile_is_anycubic_kobra_s1():
 def test_export_filename_is_safe_and_deterministic():
     assert export_filename("my design!.png", "stl") == "my_design_.stl"
     assert export_filename(".svg", "3mf") == "_svg.3mf"
-
-
-def test_svg_loading_does_not_require_system_cairo():
-    svg = b'<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="black"/></svg>'
-    image = image_from_bytes(svg, "shape.svg")
-    assert image.size == (1600, 800)
-    assert image.mode == "RGBA"

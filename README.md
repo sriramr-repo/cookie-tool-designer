@@ -5,11 +5,8 @@ A private, local Streamlit utility that turns simple artwork into printable cutt
 ## Run locally
 
 ```bash
-uv sync --locked
+uv sync
 uv run streamlit run app.py
 ```
 
 Artwork tracing is optimized for high-contrast images and logos. Choose a generator, adjust the controls, preview the resulting mesh, save the project locally, and export STL, OBJ, 3MF, or cleaned SVG.
-
-
-SVG uploads use a bundled renderer and do not require Cairo, Homebrew, or other system graphics libraries. Use `uv sync --locked` to reproduce the tested dependency set on another desktop.
