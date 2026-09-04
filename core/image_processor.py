@@ -14,8 +14,10 @@ from .models import TraceSettings
 
 def image_from_bytes(data: bytes, filename: str) -> Image.Image:
     if filename.lower().endswith(".svg"):
-        import cairosvg
-        data = cairosvg.svg2png(bytestring=data, output_width=1600, output_height=1600)
+        # resvg-py ships a platform wheel with its renderer included, avoiding
+        # Cairo/Homebrew system-library dependencies on a fresh desktop.
+        from resvg_py import svg_to_bytes
+        data = svg_to_bytes(data.decode("utf-8"), width=1600, height=1600)
     return Image.open(io.BytesIO(data)).convert("RGBA")
 
 
