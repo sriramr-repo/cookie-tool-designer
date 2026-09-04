@@ -6,7 +6,12 @@ A private, local Streamlit utility that turns simple artwork into printable cutt
 
 ```bash
 uv sync
-uv run streamlit run app.py
+./run-local.sh
 ```
 
 Artwork tracing is optimized for high-contrast images and logos. Choose a generator, adjust the controls, preview the resulting mesh, save the project locally, and export STL, OBJ, 3MF, or cleaned SVG.
+
+
+### macOS SVG support
+
+SVG uploads use Cairo. Install it once with `brew install cairo`, then start the app with `./run-local.sh`. The launcher automatically supplies Homebrew’s Cairo library path to Python.
